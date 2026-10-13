@@ -617,6 +617,26 @@ def exclusive(icon_dir: Path):
             msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 
 
+TICKET = ".request"
+
+
+def take_ticket(icon_dir: Path) -> str:
+    """Mark this `use` as the newest request (before waiting for the lock)."""
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    ticket = f"{time.time_ns()}-{os.getpid()}"
+    (icon_dir / TICKET).write_text(ticket, encoding="utf-8")
+    return ticket
+
+
+def newest(icon_dir: Path, ticket: str) -> bool:
+    """Rapid switches queue up behind the lock; only the last one still needs doing.
+    Without this, a queued older switch could finish last and leave its colors."""
+    try:
+        return (icon_dir / TICKET).read_text(encoding="utf-8").strip() == ticket
+    except OSError:
+        return True
+
+
 def undo(root: Path, icon_dir: Path, notify: bool = True):
     manifest_path = icon_dir / MANIFEST
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
@@ -859,6 +879,11 @@ def selftest() -> int:
             first.join()
             second.join()
             check(order == ["a+", "a-", "b+", "b-"], f"second run waits for the first: {order}")
+
+            older = take_ticket(icons)
+            time.sleep(0.01)
+            newer = take_ticket(icons)
+            check(not newest(icons, older) and newest(icons, newer), "only the newest request runs")
     finally:
         if sys.platform == "win32":
             for q in [tmp, *tmp.rglob("*")]:
@@ -924,7 +949,11 @@ def main(argv=None) -> int:
             theme = theme.get("theme", theme)  # accept a whole livery pack too
             set_id = save_palette(icon_dir, theme, max(0.0, min(1.0, a.strength)))
         root = Path(st["root"])
+        ticket = take_ticket(icon_dir)
         with exclusive(icon_dir):
+            if not newest(icon_dir, ticket):
+                print(f"{set_id}: skipped, a newer switch is queued")
+                return 0
             done, skipped = apply(root, plan(root, deep=st.get("deep", 0)), icon_dir,
                                   force=st.get("force", False), icon_set_id=set_id)
             save_state(icon_dir, set=set_id)
