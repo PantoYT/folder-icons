@@ -28,7 +28,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
@@ -583,6 +585,32 @@ def apply(root: Path, items, icon_dir: Path, force: bool = False, notify: bool =
     return done, skipped
 
 
+@contextmanager
+def exclusive(icon_dir: Path):
+    """One apply/use/undo at a time per icons folder. Two at once fight over the same
+    desktop.ini files (one hides a file the other is opening); a second run waits instead,
+    so the newest request is the one Explorer ends up with."""
+    try:
+        import msvcrt
+    except ImportError:  # not Windows: apply/undo do not run there anyway
+        yield
+        return
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    with open(icon_dir / ".lock", "a+b") as f:
+        f.seek(0)
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def undo(root: Path, icon_dir: Path, notify: bool = True):
     manifest_path = icon_dir / MANIFEST
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
@@ -807,6 +835,24 @@ def selftest() -> int:
             check(not ini.exists(), "ini removed")
             check(not _attrs(root / "py") & FILE_ATTRIBUTE_READONLY, "readonly cleared")
             check(foreign.exists() and not ours(foreign), "foreign ini restored")
+
+            import threading
+            order = []
+
+            def hold(tag, secs):
+                with exclusive(icons):
+                    order.append(tag + "+")
+                    time.sleep(secs)
+                    order.append(tag + "-")
+
+            first = threading.Thread(target=hold, args=("a", 0.6))
+            first.start()
+            time.sleep(0.1)
+            second = threading.Thread(target=hold, args=("b", 0))
+            second.start()
+            first.join()
+            second.join()
+            check(order == ["a+", "a-", "b+", "b-"], f"second run waits for the first: {order}")
     finally:
         if sys.platform == "win32":
             for q in [tmp, *tmp.rglob("*")]:
@@ -872,9 +918,10 @@ def main(argv=None) -> int:
             theme = theme.get("theme", theme)  # accept a whole livery pack too
             set_id = save_palette(icon_dir, theme, max(0.0, min(1.0, a.strength)))
         root = Path(st["root"])
-        done, skipped = apply(root, plan(root, deep=st.get("deep", 0)), icon_dir,
-                              force=st.get("force", False), icon_set_id=set_id)
-        save_state(icon_dir, set=set_id)
+        with exclusive(icon_dir):
+            done, skipped = apply(root, plan(root, deep=st.get("deep", 0)), icon_dir,
+                                  force=st.get("force", False), icon_set_id=set_id)
+            save_state(icon_dir, set=set_id)
         print(f"{set_id}: {len(done)} folders")
         return 0
     if a.cmd == "icons":
@@ -883,8 +930,9 @@ def main(argv=None) -> int:
         return 0
     root = a.root.resolve()
     if a.cmd == "undo":
-        for f in undo(root, a.icons.resolve()):
-            print("undone", f.name)
+        with exclusive(a.icons.resolve()):
+            for f in undo(root, a.icons.resolve()):
+                print("undone", f.name)
         return 0
     items = plan(root, deep=a.deep)
     set_id = getattr(a, "icon_set", None) or load_state(a.icons.resolve()).get("set", "material")
@@ -895,8 +943,9 @@ def main(argv=None) -> int:
     elif a.cmd == "preview":
         print(preview([it for it in items if it["folder"].parent == root], a.out, set_id))
     elif a.cmd == "apply":
-        done, skipped = apply(root, items, a.icons.resolve(), force=a.force, icon_set_id=set_id)
-        save_state(a.icons.resolve(), root=str(root), deep=a.deep, force=a.force, set=set_id)
+        with exclusive(a.icons.resolve()):
+            done, skipped = apply(root, items, a.icons.resolve(), force=a.force, icon_set_id=set_id)
+            save_state(a.icons.resolve(), root=str(root), deep=a.deep, force=a.force, set=set_id)
         print(f"applied {len(done)} folders ({set_id})")
         for name, why in skipped:
             print(f"skipped {name}: {why}")
