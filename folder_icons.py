@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -221,6 +222,7 @@ CAT_FILE_ALIAS = {"robot": "robots", "claude": "robots", "contract": "license",
 SETS = ("material",) + tuple(f"catppuccin-{f}" for f in FLAVORS)
 
 
+@lru_cache(maxsize=8)
 def cat_name_map(ts: Path) -> dict[str, str]:
     """Folder name -> catppuccin icon key, from src/defaults/folderIcons.ts."""
     if not ts.exists():
@@ -277,10 +279,89 @@ def cat_svg(spec: str, flavor: str, cat_root: Path = CAT_ROOT, material_names: d
             or cat_compose(d, ""))
 
 
+# ---------------------------------------------------------------- palette (experimental)
+#
+# Catppuccin's css-variables flavor draws every icon with var(--vscode-ctp-<color>).
+# A palette set fills those variables from an outside palette (livery's six colors):
+# the folder outline takes the palette's text color, and each motif color is its
+# Mocha reference mixed toward the accent by `strength`. Motifs keep some variety at
+# low strength and become one-colored at 1.0.
+
+PALETTE_KEYS = ("bg", "accent", "secondary", "text", "dim", "faint")
+_CTP_VAR = re.compile(r"var\(--vscode-ctp-([a-z0-9]+)\)")
+
+
+@lru_cache(maxsize=8)
+def ctp_reference(cat_root: Path = CAT_ROOT) -> dict[str, str]:
+    """Catppuccin color name -> Mocha hex, read by pairing the css-variables and mocha
+    versions of the same icon (so no palette is copied into this file)."""
+    css, mocha = cat_root / "icons" / "css-variables", cat_root / "icons" / "mocha"
+    ref: dict[str, str] = {}
+    for f in sorted(css.glob("*.svg")):
+        m = mocha / f.name
+        if not m.exists():
+            continue
+        names = _CTP_VAR.findall(f.read_text(encoding="utf-8"))
+        hexes = re.findall(r'(?:stroke|fill)="(#[0-9a-fA-F]{6})"', m.read_text(encoding="utf-8"))
+        if len(names) == len(hexes):
+            for n, h in zip(names, hexes):
+                ref.setdefault(n, h.lower())
+    return ref
+
+
+def _mix(a: str, b: str, t: float) -> str:
+    ca, cb = _hex(a), _hex(b)
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(ca, cb))
+
+
+def _hex(c: str):
+    c = c.lstrip("#")
+    return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def palette_colors(theme: dict, strength: float, ref: dict[str, str]) -> dict[str, str]:
+    out = {}
+    for name, hexv in ref.items():
+        if name == "text":
+            out[name] = theme["text"]
+        elif name.startswith(("overlay", "surface", "subtext")):
+            out[name] = theme["dim"]
+        else:
+            out[name] = _mix(hexv, theme["accent"], strength)
+    return out
+
+
+def palette_id(theme: dict, strength: float) -> str:
+    key = json.dumps({k: theme[k].lower() for k in PALETTE_KEYS} | {"s": round(strength, 2)}, sort_keys=True)
+    return "palette-" + hashlib.sha1(key.encode()).hexdigest()[:10]
+
+
+def save_palette(icon_dir: Path, theme: dict, strength: float) -> str:
+    missing = [k for k in PALETTE_KEYS if k not in theme]
+    if missing:
+        raise ValueError(f"palette is missing {', '.join(missing)}")
+    pid = palette_id(theme, strength)
+    d = icon_dir / "palettes"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{pid}.json").write_text(json.dumps({"theme": theme, "strength": strength}, indent=2), encoding="utf-8")
+    return pid
+
+
+def palette_svg(spec: str, pid: str, icon_dir: Path, cat_root: Path = CAT_ROOT,
+                material_names: dict | None = None) -> str:
+    p = json.loads((icon_dir / "palettes" / f"{pid}.json").read_text(encoding="utf-8"))
+    colors = palette_colors(p["theme"], p["strength"], dict(ctp_reference(cat_root)))
+    svg = cat_svg(spec, "css-variables", cat_root, material_names)
+    return _CTP_VAR.sub(lambda m: colors.get(m.group(1), p["theme"]["accent"]), svg)
+
+
 def resolve_svg(spec: str, icon_set_id: str = "material", icon_set: Path = ICON_SET,
-                cat_root: Path = CAT_ROOT, material_names: dict | None = None) -> str:
+                cat_root: Path = CAT_ROOT, material_names: dict | None = None,
+                icon_dir: Path | None = None) -> str:
     if icon_set_id == "material":
         return icon_svg(spec, icon_set)
+    if icon_set_id.startswith("palette-"):
+        return palette_svg(spec, icon_set_id, icon_dir or HERE / "icons", cat_root, material_names)
     if icon_set_id.startswith("catppuccin-"):
         return cat_svg(spec, icon_set_id.split("-", 1)[1], cat_root, material_names)
     raise ValueError(f"unknown icon set '{icon_set_id}' (choose from: {', '.join(SETS)})")
@@ -292,7 +373,7 @@ def write_icos(specs: list[str], icon_dir: Path, icon_set: Path = ICON_SET,
     out_dir = icon_dir / icon_set_id
     out_dir.mkdir(parents=True, exist_ok=True)
     mnames = name_map(icon_set=icon_set) if icon_set_id != "material" else None
-    todo = {s: resolve_svg(s, icon_set_id, icon_set, cat_root, mnames)
+    todo = {s: resolve_svg(s, icon_set_id, icon_set, cat_root, mnames, icon_dir)
             for s in specs if not (out_dir / icon_name(s)).exists()}
     with tempfile.TemporaryDirectory(prefix="folder-icons-") as tmp:
         pngs = rasterize(todo, ICO_SIZES, Path(tmp))
@@ -651,6 +732,30 @@ def selftest() -> int:
         check('id="tag"' in cat_svg("folder-typings-only", "mocha", cat, mn), "name map used as fallback")
         check('id="plain"' in cat_svg("folder-nothing", "mocha", cat, {}), "plain folder last")
         check('id="ts"' in cat_svg("+typescript", "mocha", cat, {}), "+spec composes in catppuccin")
+
+        css = cat / "icons" / "css-variables"
+        css.mkdir()
+        (css / "folder_docs.svg").write_text(
+            '<svg viewBox="0 0 16 16"><g><path stroke="var(--vscode-ctp-text)" d="M0 0"/>'
+            '<path stroke="var(--vscode-ctp-blue)" d="M9 9"/></g></svg>')
+        (mocha / "folder_docs.svg").write_text(
+            '<svg viewBox="0 0 16 16"><g><path stroke="#cdd6f4" d="M0 0"/><path stroke="#89b4fa" d="M9 9"/></g></svg>')
+        ref = ctp_reference(cat)
+        check(ref == {"text": "#cdd6f4", "blue": "#89b4fa"}, f"ctp reference from paired icons {ref}")
+        theme = {"bg": "#101010", "accent": "#ff0000", "secondary": "#00ff00",
+                 "text": "#eeeeee", "dim": "#555555", "faint": "#202020"}
+        check(palette_colors(theme, 1.0, ref) == {"text": "#eeeeee", "blue": "#ff0000"}, "full strength = accent")
+        check(palette_colors(theme, 0.0, ref)["blue"] == "#89b4fa", "zero strength = reference")
+        pid = save_palette(tmp / "pal", theme, 0.5)
+        check(pid == palette_id(dict(theme), 0.5) and pid.startswith("palette-"), "palette id stable")
+        svg = palette_svg("folder-docs", pid, tmp / "pal", cat, {})
+        check("var(" not in svg and "#eeeeee" in svg and _mix("#89b4fa", "#ff0000", 0.5) in svg,
+              "palette svg has no variables left")
+        try:
+            save_palette(tmp / "pal", {"bg": "#000000"}, 0.5)
+            check(False, "incomplete palette rejected")
+        except ValueError:
+            check(True, "incomplete palette rejected")
         nroot = tmp / "nroot"
         for d in (".py", ".hidden", "proj/py", "proj/a/b/c/py", "proj/node_modules/py", "py"):
             (nroot / d).mkdir(parents=True)
@@ -735,8 +840,12 @@ def main(argv=None) -> int:
         if name == "preview":
             p.add_argument("--out", type=Path, default=HERE / "preview.png")
     u = sub.add_parser("use", help="switch the applied folders to another icon set")
-    u.add_argument("icon_set", choices=SETS + ("catppuccin",))
+    u.add_argument("icon_set", choices=SETS + ("catppuccin", "palette"))
     u.add_argument("--icons", type=Path, default=HERE / "icons")
+    u.add_argument("--palette", help="palette: JSON text or a .json file with "
+                   + ", ".join(PALETTE_KEYS) + " (experimental, for `use palette`)")
+    u.add_argument("--strength", type=float, default=0.6,
+                   help="0..1, how far motif colors move toward the accent (default 0.6)")
     sub.add_parser("fetch")
     sub.add_parser("icons")
     sub.add_parser("selftest")
@@ -753,6 +862,15 @@ def main(argv=None) -> int:
             print("nothing applied yet; run apply first", file=sys.stderr)
             return 1
         set_id = "catppuccin-mocha" if a.icon_set == "catppuccin" else a.icon_set
+        if set_id == "palette":
+            if not a.palette:
+                print("use palette needs --palette (JSON text or a .json file)", file=sys.stderr)
+                return 2
+            src = Path(a.palette)
+            theme = json.loads(src.read_text(encoding="utf-8") if src.suffix == ".json" and src.exists()
+                               else a.palette)
+            theme = theme.get("theme", theme)  # accept a whole livery pack too
+            set_id = save_palette(icon_dir, theme, max(0.0, min(1.0, a.strength)))
         root = Path(st["root"])
         done, skipped = apply(root, plan(root, deep=st.get("deep", 0)), icon_dir,
                               force=st.get("force", False), icon_set_id=set_id)

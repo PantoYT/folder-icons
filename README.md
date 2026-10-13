@@ -28,6 +28,10 @@ python folder_icons.py selftest
 
 `fetch` sparse-clones only the icon directories of both themes into `.material/` and `.catppuccin/`. Run it again later to update them.
 
+`folder-icons.cmd` runs the script through the `py` launcher, or through `python` when there is no launcher. Put this folder on your PATH and `folder-icons apply D:\Projects` works from anywhere. The examples below use `python folder_icons.py`, which is the same thing.
+
+[livery](https://github.com/PantoYT/livery) users can install all of this with its installer instead. See [livery](#livery-experimental) below.
+
 ## Use
 
 Look before you touch anything:
@@ -59,6 +63,33 @@ python folder_icons.py undo D:\Projects
 ```
 
 If Explorer keeps showing old icons, run `ie4uinit.exe -show` or restart Explorer.
+
+## Your own palette (experimental)
+
+Catppuccin also publishes its icons with CSS variables in place of colors. The `palette` set fills those variables from six colors of your own: `bg`, `accent`, `secondary`, `text`, `dim` and `faint`.
+
+- **Folder outlines** take `text`.
+- **Gray details** take `dim`.
+- **Each motif color** is its Catppuccin Mocha color mixed toward `accent` by `--strength`:
+  - `0` keeps Catppuccin's colors;
+  - `1` makes every motif the accent.
+
+```
+python folder_icons.py use palette --palette "{\"bg\":\"#1e1318\",\"accent\":\"#f96f9d\",\"secondary\":\"#a8a40f\",\"text\":\"#ab949d\",\"dim\":\"#5b4a51\",\"faint\":\"#2d2126\"}" --strength 0.5
+python folder_icons.py use palette --palette my-palette.json
+```
+
+Each palette and strength renders once into its own `icons/palette-<hash>/` folder (a few seconds), and switching back to it later is instant. The Mocha reference colors are not copied into this tool. They are read by pairing each icon's CSS-variable version with its Mocha version.
+
+### livery (experimental)
+
+[livery](https://github.com/PantoYT/livery) re-themes a Windows desk from a wallpaper. Its `folder_icons` plugin runs `use palette` with the pack's colors on every pack switch, in the background, so the switch never waits for it.
+
+1. In livery's installer, tick the folder-icons task, or run `install.ps1 -FolderIcons`. It puts this tool in `%LOCALAPPDATA%\Programs\folder-icons` and gets Pillow, Node.js and git if they are missing.
+2. Run `folder-icons apply D:\Projects` once (add `--deep 3` if you want subfolders too).
+3. Run `livery apps on folder_icons`.
+
+`livery apps intensity N folder_icons` sets the strength (0 to 100). `livery apps off folder_icons` puts back the set you had before.
 
 ## How a folder gets its icon
 
