@@ -535,13 +535,13 @@ def _set_attrs(p: Path, a: int):
 
 
 def _notify(paths):
-    """Tell Explorer the folders changed, item by item. Not UPDATEDIR on the parent: that makes
-    an open window re-list its contents and flash "This folder is empty" for a moment."""
+    """Tell Explorer which folders changed, item by item. Neither UPDATEDIR on the parent nor
+    the global ASSOCCHANGED: both make open windows re-list everything, which shows as
+    "This folder is empty" for a moment (or for good when switches come fast)."""
     shell = ctypes.windll.shell32
-    SHCNE_UPDATEITEM, SHCNE_ASSOCCHANGED, SHCNF_PATHW = 0x2000, 0x08000000, 0x5
+    SHCNE_UPDATEITEM, SHCNF_PATHW = 0x2000, 0x5
     for p in paths:
         shell.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, ctypes.c_wchar_p(str(p)), None)
-    shell.SHChangeNotify(SHCNE_ASSOCCHANGED, 0, None, None)
 
 
 def ours(ini: Path) -> bool:
@@ -557,7 +557,7 @@ def apply(root: Path, items, icon_dir: Path, force: bool = False, notify: bool =
     write_icos(sorted({it["icon"] for it in items}), icon_dir, icon_set, icon_set_id, cat_root)
     manifest_path = icon_dir / MANIFEST
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
-    done, skipped = [], []
+    done, skipped, changed = [], [], []
     for it in items:
         folder = it["folder"]
         ini = folder / "desktop.ini"
@@ -574,16 +574,31 @@ def apply(root: Path, items, icon_dir: Path, force: bool = False, notify: bool =
                 backup = folder / "desktop.ini.folder-icons-bak"
                 _set_attrs(ini, 0x80)
                 shutil.copyfile(ini, backup)
-        if ini.exists():
-            _set_attrs(ini, 0x80)  # NORMAL, otherwise a hidden+system file cannot be rewritten
-        ini.write_text(f"{MARK}\r\n[.ShellClassInfo]\r\nIconResource={ico},0\r\n",
-                       encoding="utf-8", newline="")
-        _set_attrs(ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)
-        _set_attrs(folder, _attrs(folder) | FILE_ATTRIBUTE_READONLY)
+        # Every attribute flip is a change notification, and Explorer re-reads the folder on
+        # each one; hundreds of them per switch left open windows showing "This folder is empty".
+        # So: rewrite our own desktop.ini in place (opening a hidden+system file for writing
+        # works, re-creating it does not), and touch attributes only when they are wrong.
+        content = f"{MARK}\r\n[.ShellClassInfo]\r\nIconResource={ico},0\r\n".encode("utf-8")
+        if ini.exists() and ours(ini):
+            if ini.read_bytes() != content:
+                with open(ini, "r+b") as f:
+                    f.write(content)
+                    f.truncate()
+                changed.append(folder)
+        else:
+            if ini.exists():
+                _set_attrs(ini, 0x80)  # NORMAL, so a foreign hidden+system file can be replaced
+            ini.write_bytes(content)
+            changed.append(folder)
+        hs = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+        if _attrs(ini) & hs != hs:
+            _set_attrs(ini, hs)
+        if not _attrs(folder) & FILE_ATTRIBUTE_READONLY:
+            _set_attrs(folder, _attrs(folder) | FILE_ATTRIBUTE_READONLY)
         done.append(folder)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if notify:
-        _notify(done)
+        _notify(changed)
     return done, skipped
 
 
@@ -848,8 +863,17 @@ def selftest() -> int:
             check(b"\r\r\n" not in ini.read_bytes(), "ini has plain CRLF")
             check(_attrs(ini) & FILE_ATTRIBUTE_HIDDEN, "ini hidden")
             check(_attrs(root / "py") & FILE_ATTRIBUTE_READONLY, "folder readonly")
+            mtime = ini.stat().st_mtime_ns
+            time.sleep(0.05)
             apply(root, items, icons, notify=False, icon_set=iset)  # idempotent re-run
             check(ours(ini), "re-apply ok")
+            check(ini.stat().st_mtime_ns == mtime, "same set again does not rewrite desktop.ini")
+            other = [dict(it, icon="+cpp") for it in items]
+            apply(root, other, icons, notify=False, icon_set=iset)
+            check("compose-cpp.ico" in ini.read_text(encoding="utf-8")
+                  and _attrs(ini) & FILE_ATTRIBUTE_HIDDEN and _attrs(ini) & FILE_ATTRIBUTE_SYSTEM,
+                  "new set rewritten in place, still hidden+system")
+            apply(root, items, icons, notify=False, icon_set=iset)
             done, _ = apply(root, items, icons, force=True, notify=False, icon_set=iset)
             check(len(done) == 2, "force overrides foreign ini")
             undone = undo(root, icons, notify=False)
