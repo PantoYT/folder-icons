@@ -1,0 +1,9 @@
+icons/
+/preview.png
+config.json
+__pycache__/
+.impeccable/
+.material/
+node_modules/
+.catppuccin/
+/preview-*.png

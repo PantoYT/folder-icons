@@ -1,0 +1,11 @@
+{
+  "folders": {
+    "discord-bot": {"icon": "folder-robot"},
+    "homelab": {"icon": "folder-server"},
+    "dotfiles": {"icon": "folder-theme"},
+    "notes": {"kind": "docs"},
+    "firmware": {"icon": "+arduino"},
+    "vendor-sdk": {"shallow": true},
+    "tmp": {"skip": true}
+  }
+}

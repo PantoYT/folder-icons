@@ -1,0 +1,10 @@
+{
+  "name": "folder-icons",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SVG rasterizer for folder-icons (Windows Explorer folder icons from VS Code icon themes).",
+  "license": "MIT",
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  }
+}
