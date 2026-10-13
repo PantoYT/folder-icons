@@ -535,10 +535,16 @@ def _set_attrs(p: Path, a: int):
 
 
 def _notify(paths):
+    """Tell Explorer the folders changed. UPDATEITEM alone leaves icons that an open window
+    already shows; UPDATEDIR on each parent makes that window re-read its items."""
     shell = ctypes.windll.shell32
-    SHCNE_UPDATEITEM, SHCNE_ASSOCCHANGED, SHCNF_PATHW = 0x2000, 0x08000000, 0x5
+    SHCNE_UPDATEITEM, SHCNE_UPDATEDIR, SHCNE_ASSOCCHANGED = 0x2000, 0x1000, 0x08000000
+    SHCNF_PATHW, SHCNF_FLUSHNOWAIT = 0x5, 0x3000
+    paths = [Path(p) for p in paths]
     for p in paths:
         shell.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, ctypes.c_wchar_p(str(p)), None)
+    for parent in sorted({p.parent for p in paths}):
+        shell.SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, ctypes.c_wchar_p(str(parent)), None)
     shell.SHChangeNotify(SHCNE_ASSOCCHANGED, 0, None, None)
 
 
