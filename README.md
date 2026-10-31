@@ -153,6 +153,7 @@ Catppuccin has fewer folder icons (~110), so each spec is translated in this ord
 - **Git:** every iconed repository gains an untracked `desktop.ini`. Add it to your global gitignore:
   `git config --global core.excludesfile` shows the file, then add a `desktop.ini` line to it.
 - **Python's `shutil.rmtree` cannot delete a read-only folder** on Windows ("Access is denied"). PowerShell, cmd, Node and `rm -rf` can. This is why `--deep` stays out of folders that build tools delete and recreate. If a Python script of yours deletes iconed folders, run `undo` first or leave that project `shallow`.
+- **Sandboxes that label a folder tree Low integrity break the icons.** Explorer ignores a `desktop.ini` or `.ico` with a Low mandatory label, so folders go plain while every file is still in place (`icacls <folder>` shows `Low Mandatory Level`). Codex's Windows sandbox labels its writable roots this way. `apply` and `use` give `desktop.ini` and `icons/` an explicit Medium label whenever they find a Low one, and touch the folder so Explorer drops its cached plain icon.
 - **The icons render on your machine** from the theme repositories, and this repository does not ship them.
 
 ## License

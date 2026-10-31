@@ -544,6 +544,60 @@ def _notify(paths):
         shell.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, ctypes.c_wchar_p(str(p)), None)
 
 
+def _label(p: Path) -> str:
+    """The integrity label part of p's security descriptor as SDDL, e.g. "S:AI(ML;ID;NW;;;LW)"."""
+    adv = ctypes.windll.advapi32
+    sacl, sd, s = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_wchar_p()
+    LABEL_SECURITY_INFORMATION, SE_FILE_OBJECT = 0x10, 1
+    if adv.GetNamedSecurityInfoW(str(p), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION,
+                                 None, None, None, ctypes.byref(sacl), ctypes.byref(sd)):
+        raise OSError(f"GetNamedSecurityInfo failed: {p}")
+    try:
+        if not adv.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd, 1, LABEL_SECURITY_INFORMATION, ctypes.byref(s), None):
+            raise OSError(f"ConvertSecurityDescriptorToStringSecurityDescriptor failed: {p}")
+        text = s.value or ""
+        ctypes.windll.kernel32.LocalFree(s)
+        return text
+    finally:
+        ctypes.windll.kernel32.LocalFree(sd)
+
+
+def low_integrity(p: Path) -> bool:
+    """True when p carries a Low (or Untrusted) mandatory label. Only the first label ACE
+    counts, and explicit ACEs come before inherited ones."""
+    m = re.search(r"\(ML;[^;]*;[^;]*;;;([^)]+)\)", _label(p))
+    return bool(m) and m.group(1) in ("LW", "S-1-16-4096", "S-1-16-0")
+
+
+def trust(p: Path, inherit: bool = False) -> bool:
+    """Give p an explicit Medium integrity label if it has a Low one. Returns whether it did.
+
+    Explorer ignores a desktop.ini, and an icon file, that is labelled Low integrity: anything
+    a sandboxed process can write is not trusted to customize the shell. Sandboxes that label
+    a whole workspace Low (Codex's Windows sandbox does this to its writable roots) therefore
+    turn every icon back into a plain folder, with desktop.ini and attributes still correct.
+    An explicit label wins over the inherited one, so a later relabel of the parent leaves it."""
+    if not low_integrity(p):
+        return False
+    adv = ctypes.windll.advapi32
+    sd, sacl = ctypes.c_void_p(), ctypes.c_void_p()
+    present, defaulted = ctypes.c_int(), ctypes.c_int()
+    sddl = "S:(ML;OICI;NW;;;ME)" if inherit else "S:(ML;;NW;;;ME)"
+    if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(sd), None):
+        raise OSError("ConvertStringSecurityDescriptorToSecurityDescriptor failed")
+    try:
+        adv.GetSecurityDescriptorSacl(sd, ctypes.byref(present), ctypes.byref(sacl), ctypes.byref(defaulted))
+        LABEL_SECURITY_INFORMATION, SE_FILE_OBJECT = 0x10, 1
+        err = adv.SetNamedSecurityInfoW(str(p), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION,
+                                        None, None, None, sacl)
+        if err:
+            raise OSError(f"SetNamedSecurityInfo failed ({err}): {p}")
+    finally:
+        ctypes.windll.kernel32.LocalFree(sd)
+    return True
+
+
 def ours(ini: Path) -> bool:
     try:
         return MARK in ini.read_text(encoding="utf-8", errors="replace")
@@ -555,6 +609,7 @@ def apply(root: Path, items, icon_dir: Path, force: bool = False, notify: bool =
           icon_set: Path = ICON_SET, icon_set_id: str = "material", cat_root: Path = CAT_ROOT):
     icon_dir.mkdir(parents=True, exist_ok=True)
     write_icos(sorted({it["icon"] for it in items}), icon_dir, icon_set, icon_set_id, cat_root)
+    trust(icon_dir, inherit=True)  # the .ico files inherit it, rendered now or later
     manifest_path = icon_dir / MANIFEST
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     done, skipped, changed = [], [], []
@@ -593,6 +648,12 @@ def apply(root: Path, items, icon_dir: Path, force: bool = False, notify: bool =
         hs = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
         if _attrs(ini) & hs != hs:
             _set_attrs(ini, hs)
+        if trust(ini):
+            # Explorer cached the plain folder while the label was Low and keys that on the
+            # folder's write time; a notify alone does not make it look again.
+            os.utime(folder)
+            if folder not in changed:
+                changed.append(folder)
         if not _attrs(folder) & FILE_ATTRIBUTE_READONLY:
             _set_attrs(folder, _attrs(folder) | FILE_ATTRIBUTE_READONLY)
         done.append(folder)
@@ -881,6 +942,18 @@ def selftest() -> int:
             check(not ini.exists(), "ini removed")
             check(not _attrs(root / "py") & FILE_ATTRIBUTE_READONLY, "readonly cleared")
             check(foreign.exists() and not ours(foreign), "foreign ini restored")
+            # a sandbox labels the whole tree Low: Explorer then ignores every desktop.ini
+            for d in (root, icons):
+                subprocess.run(["icacls", str(d), "/setintegritylevel", "(OI)(CI)L"],
+                               capture_output=True, check=True)
+            check(low_integrity(root / "py") and low_integrity(icons), "test tree labelled low")
+            apply(root, [it for it in items if it["folder"].name == "py"], icons,
+                  notify=False, icon_set=iset)
+            ico = icons / "material" / "folder-python.ico"
+            check(not low_integrity(ini) and not low_integrity(ico) and not low_integrity(icons),
+                  "apply lifts the low label off desktop.ini and the icons")
+            check(not trust(ini), "trust leaves a medium label alone")
+            undo(root, icons, notify=False)
 
             import threading
             order = []
