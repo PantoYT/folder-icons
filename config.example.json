@@ -1,6 +1,11 @@
 {
+  "categories": {
+    "web": {"color": "#f28c28"},
+    "hardware": {"color": "#4caf50"},
+    "tools": {"color": "#ab47bc"}
+  },
   "folders": {
-    "discord-bot": {"icon": "folder-robot"},
+    "discord-bot": {"icon": "folder-robot", "category": "tools"},
     "homelab": {"icon": "folder-server"},
     "dotfiles": {"icon": "folder-theme"},
     "notes": {"kind": "docs"},

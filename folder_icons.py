@@ -360,6 +360,14 @@ def palette_svg(spec: str, pid: str, icon_dir: Path, cat_root: Path = CAT_ROOT,
 def resolve_svg(spec: str, icon_set_id: str = "material", icon_set: Path = ICON_SET,
                 cat_root: Path = CAT_ROOT, material_names: dict | None = None,
                 icon_dir: Path | None = None) -> str:
+    """A spec may end in "~rrggbb": the category color drawn as a bar under the icon."""
+    base, _, tint = spec.partition("~")
+    svg = _resolve_base(base, icon_set_id, icon_set, cat_root, material_names, icon_dir)
+    return category_bar(svg, tint) if tint else svg
+
+
+def _resolve_base(spec: str, icon_set_id: str, icon_set: Path, cat_root: Path,
+                  material_names: dict | None, icon_dir: Path | None) -> str:
     if icon_set_id == "material":
         return icon_svg(spec, icon_set)
     if icon_set_id.startswith("palette-"):
@@ -383,6 +391,25 @@ def write_icos(specs: list[str], icon_dir: Path, icon_set: Path = ICON_SET,
             imgs = [Image.open(pngs[(spec, s)]).convert("RGBA") for s in ICO_SIZES]
             imgs[-1].save(out_dir / icon_name(spec), format="ICO",
                           sizes=[(s, s) for s in ICO_SIZES], append_images=imgs[:-1])
+
+
+_VIEWBOX = re.compile(r'viewBox="\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)\s*"')
+
+
+def category_bar(svg: str, color: str) -> str:
+    """Shrink the icon to the top 80% and draw a rounded bar in the category color under it."""
+    m = _VIEWBOX.search(svg)
+    x, y, w, h = (float(v) for v in m.groups()) if m else (0.0, 0.0, 16.0, 16.0)
+    open_end = svg.index(">", svg.index("<svg")) + 1
+    close = svg.rindex("</svg>")
+    s = 0.8
+    dx = x + w * (1 - s) / 2
+    inner = (f'<g transform="translate({dx:g} {y:g}) scale({s:g}) translate({-x:g} {-y:g})">'
+             f"{svg[open_end:close]}</g>")
+    bh = h * 0.13
+    bar = (f'<rect x="{x + w * 0.12:g}" y="{y + h - bh - h * 0.02:g}" width="{w * 0.76:g}" '
+           f'height="{bh:g}" rx="{bh / 2:g}" fill="#{color.lstrip("#")}"/>')
+    return svg[:open_end] + inner + bar + svg[close:]
 
 
 def icon_name(spec: str) -> str:
@@ -428,13 +455,40 @@ def load_overrides() -> dict:
     return json.loads(p.read_text(encoding="utf-8")).get("folders", {})
 
 
+def load_categories() -> dict:
+    """config.json "categories": {"web": {"color": "#f28c28"}}. A folder joins one with
+    "category": "web" in its "folders" entry: it gets that Explorer tag (System.Keywords,
+    so View > Group by > Tags works) and a bar in the category color under its icon."""
+    p = HERE / "config.json"
+    if not p.exists():
+        return {}
+    return json.loads(p.read_text(encoding="utf-8")).get("categories", {})
+
+
+TAG_SECTION = "[{F29F85E0-4FF9-1068-AB91-08002B27B3D9}]"  # summary properties; Prop5 = Keywords/Tags
+
+
 def plan(root: Path, overrides: dict | None = None, names: dict | None = None,
-         deep: int = 0):
+         deep: int = 0, categories: dict | None = None):
     """Top level: override > theme name > detected kind. Dot folders only get a
     theme-name icon. With deep > 0, subfolders of each project up to that depth
-    get an icon when (and only when) their name is in the theme's map."""
+    get an icon when (and only when) their name is in the theme's map.
+    A top-level folder with a "category" gets that tag and a colored bar."""
     overrides = load_overrides() if overrides is None else overrides
     names = name_map() if names is None else names
+    categories = load_categories() if categories is None else categories
+    out = _plan_top(root, overrides, names, deep)
+    for it in out:
+        cat = it.pop("_category", None)
+        if cat:
+            it["category"] = cat
+            color = categories.get(cat, {}).get("color")
+            if color:
+                it["icon"] = f'{it["icon"]}~{color.lstrip("#").lower()}'
+    return out
+
+
+def _plan_top(root: Path, overrides: dict, names: dict, deep: int):
     out = []
     for f in sorted(root.iterdir(), key=lambda p: p.name.lower()):
         if not f.is_dir():
@@ -454,7 +508,7 @@ def plan(root: Path, overrides: dict | None = None, names: dict | None = None,
         else:  # project names are not generic folder names ("IT", "Math"), so no theme lookup here
             kind = detect(f)
             spec = KINDS.get(kind, KINDS["unknown"])
-        out.append({"folder": f, "kind": kind, "icon": spec})
+        out.append({"folder": f, "kind": kind, "icon": spec, "_category": ov.get("category")})
         if deep and not ov.get("shallow"):
             out.extend(_deep(f, names, deep))
     return out
@@ -633,7 +687,10 @@ def apply(root: Path, items, icon_dir: Path, force: bool = False, notify: bool =
         # each one; hundreds of them per switch left open windows showing "This folder is empty".
         # So: rewrite our own desktop.ini in place (opening a hidden+system file for writing
         # works, re-creating it does not), and touch attributes only when they are wrong.
-        content = f"{MARK}\r\n[.ShellClassInfo]\r\nIconResource={ico},0\r\n".encode("utf-8")
+        text = f"{MARK}\r\n[.ShellClassInfo]\r\nIconResource={ico},0\r\n"
+        if it.get("category"):
+            text += f"{TAG_SECTION}\r\nProp5=31,{it['category']}\r\n"
+        content = text.encode("utf-8")
         if ini.exists() and ours(ini):
             if ini.read_bytes() != content:
                 with open(ini, "r+b") as f:
@@ -937,6 +994,21 @@ def selftest() -> int:
             apply(root, items, icons, notify=False, icon_set=iset)
             done, _ = apply(root, items, icons, force=True, notify=False, icon_set=iset)
             check(len(done) == 2, "force overrides foreign ini")
+            planned = plan(root, overrides={"py": {"icon": "folder-python", "category": "web"}},
+                           categories={"web": {"color": "#F28C28"}})
+            py_item = next(i for i in planned if i["folder"].name == "py")
+            check(py_item.get("category") == "web" and py_item["icon"] == "folder-python~f28c28",
+                  f"category from config gives tag and tinted spec {py_item}")
+            apply(root, [py_item], icons, notify=False, icon_set=iset)
+            txt = ini.read_text(encoding="utf-8")
+            check(TAG_SECTION in txt and "Prop5=31,web" in txt, "category written as Explorer tag")
+            with Image.open(icons / "material" / "folder-python~f28c28.ico") as im:
+                im.size = (256, 256)
+                px = im.convert("RGBA").getpixel((128, 236))
+            check(abs(px[0] - 0xf2) < 8 and abs(px[1] - 0x8c) < 8 and abs(px[2] - 0x28) < 8,
+                  f"category bar drawn under the icon {px}")
+            apply(root, items, icons, notify=False, icon_set=iset)
+            check("Prop5" not in ini.read_text(encoding="utf-8"), "tag removed when category goes")
             undone = undo(root, icons, notify=False)
             check(len(undone) == 2, f"undo count {undone}")
             check(not ini.exists(), "ini removed")

@@ -132,6 +132,30 @@ An icon spec uses Material's vocabulary:
 - `folder-<name>`: a Material folder icon. `python folder_icons.py icons` lists all ~280 names.
 - `+<name>`: the file icon `<name>.svg` on a plain folder. Use it for languages without a folder icon, like `+cpp`, `+csharp` or `+arduino`.
 
+### Categories
+
+Explorer sorts folders only by name. Categories group them another way. Give a top-level folder a `category`, and define the category's color:
+
+```json
+{
+  "categories": {
+    "web":      {"color": "#f28c28"},
+    "hardware": {"color": "#4caf50"}
+  },
+  "folders": {
+    "shop-site": {"category": "web"},
+    "robot-arm": {"icon": "+arduino", "category": "hardware"}
+  }
+}
+```
+
+Each folder in a category gets two things:
+
+- **A tag.** The category is written into `desktop.ini` as the folder's Tags property (`System.Keywords`). In Explorer, right-click the column header and add **Tags**, then use **View > Group by > Tags**. Each category becomes its own section.
+- **A colored bar** under the icon, in the category color. The icon shrinks a little to make room for it.
+
+Remove the `category` and run `apply` again, and both go away.
+
 Catppuccin has fewer folder icons (~110), so each spec is translated in this order:
 
 1. the same folder (also its plural, singular, or an alias in `CAT_FOLDER_ALIAS`);
