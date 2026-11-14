@@ -156,6 +156,14 @@ Each folder in a category gets two things:
 
 Remove the `category` and run `apply` again, and both go away.
 
+Two more category options and one folder option:
+
+- **`"tag": "2-web"`** sets the tag text, which is also the sort key. A number in front puts the categories in your order instead of alphabetical order. The number is only visible in Details view.
+- **`"bar": false`** keeps the icons as they are, with no bar.
+- **`"separator": true`** on a folder turns it into a solid folder in its category color. Name it so it sorts first, for example `!web`: `!` sorts before letters, `.` and `_` in Explorer.
+
+Sort by tag, then name, and each category opens with its separator: **View > Sort by > More... > Tags**, or click the Tags column header in Details view.
+
 Catppuccin has fewer folder icons (~110), so each spec is translated in this order:
 
 1. the same folder (also its plural, singular, or an alias in `CAT_FOLDER_ALIAS`);

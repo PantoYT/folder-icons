@@ -360,7 +360,10 @@ def palette_svg(spec: str, pid: str, icon_dir: Path, cat_root: Path = CAT_ROOT,
 def resolve_svg(spec: str, icon_set_id: str = "material", icon_set: Path = ICON_SET,
                 cat_root: Path = CAT_ROOT, material_names: dict | None = None,
                 icon_dir: Path | None = None) -> str:
-    """A spec may end in "~rrggbb": the category color drawn as a bar under the icon."""
+    """A spec may end in "~rrggbb": the category color drawn as a bar under the icon.
+    "=rrggbb" is a solid folder in that color (a category separator)."""
+    if spec.startswith("="):
+        return solid_folder(spec[1:])
     base, _, tint = spec.partition("~")
     svg = _resolve_base(base, icon_set_id, icon_set, cat_root, material_names, icon_dir)
     return category_bar(svg, tint) if tint else svg
@@ -412,7 +415,19 @@ def category_bar(svg: str, color: str) -> str:
     return svg[:open_end] + inner + bar + svg[close:]
 
 
+_FOLDER_PATH = ("m6.922 3.768-.644-.536A1 1 0 0 0 5.638 3H2a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h12"
+                "a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H7.562a1 1 0 0 1-.64-.232")
+
+
+def solid_folder(color: str) -> str:
+    """A plain folder filled with one color: the separator that opens a category."""
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+            f'<path fill="#{color.lstrip("#")}" d="{_FOLDER_PATH}"/></svg>')
+
+
 def icon_name(spec: str) -> str:
+    if spec.startswith("="):
+        return f"solid-{spec[1:]}.ico"
     return ("compose-" + (spec[1:] or "plain") if spec.startswith("+") else spec) + ".ico"
 
 
@@ -456,9 +471,12 @@ def load_overrides() -> dict:
 
 
 def load_categories() -> dict:
-    """config.json "categories": {"web": {"color": "#f28c28"}}. A folder joins one with
-    "category": "web" in its "folders" entry: it gets that Explorer tag (System.Keywords,
-    so View > Group by > Tags works) and a bar in the category color under its icon."""
+    """config.json "categories": {"web": {"color": "#f28c28", "tag": "2-web", "bar": false}}.
+    A folder joins one with "category": "web" in its "folders" entry: it gets the Explorer
+    tag (System.Keywords, so View > Sort by / Group by > Tags works; "tag" defaults to the
+    category name and is where a sort number goes) and, unless "bar" is false, a bar in
+    the category color under its icon. A folder with "separator": true becomes a solid
+    folder in the category color."""
     p = HERE / "config.json"
     if not p.exists():
         return {}
@@ -480,11 +498,16 @@ def plan(root: Path, overrides: dict | None = None, names: dict | None = None,
     out = _plan_top(root, overrides, names, deep)
     for it in out:
         cat = it.pop("_category", None)
-        if cat:
-            it["category"] = cat
-            color = categories.get(cat, {}).get("color")
-            if color:
-                it["icon"] = f'{it["icon"]}~{color.lstrip("#").lower()}'
+        separator = it.pop("_separator", False)
+        if not cat:
+            continue
+        spec = categories.get(cat, {})
+        it["category"] = spec.get("tag", cat)
+        color = (spec.get("color") or "").lstrip("#").lower()
+        if separator and color:
+            it["icon"] = f"={color}"
+        elif color and spec.get("bar", True):
+            it["icon"] = f'{it["icon"]}~{color}'
     return out
 
 
@@ -508,7 +531,8 @@ def _plan_top(root: Path, overrides: dict, names: dict, deep: int):
         else:  # project names are not generic folder names ("IT", "Math"), so no theme lookup here
             kind = detect(f)
             spec = KINDS.get(kind, KINDS["unknown"])
-        out.append({"folder": f, "kind": kind, "icon": spec, "_category": ov.get("category")})
+        out.append({"folder": f, "kind": kind, "icon": spec, "_category": ov.get("category"),
+                    "_separator": bool(ov.get("separator"))})
         if deep and not ov.get("shallow"):
             out.extend(_deep(f, names, deep))
     return out
@@ -999,6 +1023,15 @@ def selftest() -> int:
             py_item = next(i for i in planned if i["folder"].name == "py")
             check(py_item.get("category") == "web" and py_item["icon"] == "folder-python~f28c28",
                   f"category from config gives tag and tinted spec {py_item}")
+            alt = plan(root, overrides={"py": {"icon": "folder-python", "category": "web"},
+                                        "pcb": {"category": "web", "separator": True}},
+                       categories={"web": {"color": "#F28C28", "tag": "2-web", "bar": False}})
+            by = {i["folder"].name: i for i in alt}
+            check(by["py"]["icon"] == "folder-python" and by["py"]["category"] == "2-web",
+                  f"bar off keeps the icon, tag carries the sort prefix {by['py']}")
+            check(by["pcb"]["icon"] == "=f28c28" and icon_name("=f28c28") == "solid-f28c28.ico",
+                  f"separator is a solid folder {by['pcb']}")
+            check('fill="#f28c28"' in resolve_svg("=f28c28"), "solid folder svg uses the color")
             apply(root, [py_item], icons, notify=False, icon_set=iset)
             txt = ini.read_text(encoding="utf-8")
             check(TAG_SECTION in txt and "Prop5=31,web" in txt, "category written as Explorer tag")
