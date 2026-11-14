@@ -1032,6 +1032,18 @@ def selftest() -> int:
             check(by["pcb"]["icon"] == "=f28c28" and icon_name("=f28c28") == "solid-f28c28.ico",
                   f"separator is a solid folder {by['pcb']}")
             check('fill="#f28c28"' in resolve_svg("=f28c28"), "solid folder svg uses the color")
+            base_cfg = {"categories": {"web": {}}, "folders": {"py": {"icon": "folder-python"}}}
+            moved = set_category(base_cfg, "py", "web")
+            check(moved["folders"]["py"] == {"icon": "folder-python", "category": "web"}
+                  and "category" not in base_cfg["folders"]["py"], "set_category adds, input untouched")
+            check(set_category({"categories": {"web": {}}, "folders": {"x": {"category": "web"}}},
+                               "x", None)["folders"] == {}, "removing the last key drops the entry")
+            try:
+                set_category(base_cfg, "py", "nope")
+                refused = False
+            except ValueError:
+                refused = True
+            check(refused, "unknown category refused")
             apply(root, [py_item], icons, notify=False, icon_set=iset)
             txt = ini.read_text(encoding="utf-8")
             check(TAG_SECTION in txt and "Prop5=31,web" in txt, "category written as Explorer tag")
@@ -1097,6 +1109,68 @@ def selftest() -> int:
 
 # ---------------------------------------------------------------- cli
 
+def set_category(cfg: dict, folder: str, category: str | None) -> dict:
+    """Return cfg with `folder` moved into `category` (None removes it). Pure, for tests."""
+    cats = cfg.get("categories", {})
+    if category is not None and category not in cats:
+        raise ValueError(f"unknown category '{category}' (have: {', '.join(cats) or 'none'})")
+    entry = dict(cfg.get("folders", {}).get(folder, {}))
+    if category is None:
+        entry.pop("category", None)
+    else:
+        entry["category"] = category
+    folders = dict(cfg.get("folders", {}))
+    if entry:
+        folders[folder] = entry
+    else:
+        folders.pop(folder, None)
+    return {**cfg, "folders": folders}
+
+
+def category_cmd(folder: str | None, category: str | None, icon_dir: Path) -> int:
+    cfg_path = HERE / "config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    st = load_state(icon_dir)
+    root = Path(st["root"]) if "root" in st else None
+    cats = cfg.get("categories", {})
+    if folder is None:
+        members = {c: [] for c in cats}
+        for name, ov in cfg.get("folders", {}).items():
+            if ov.get("category") in members:
+                members[ov["category"]].append(name)
+        for c, spec in cats.items():
+            print(f"{c:10} {spec.get('color', ''):8} {len(members[c]):3}  {spec.get('tag', c)}")
+        if root:
+            loose = [p.name for p in sorted(root.iterdir(), key=lambda p: p.name.lower())
+                     if p.is_dir() and not p.name.startswith(".")
+                     and not cfg.get("folders", {}).get(p.name, {}).get("category")]
+            print(f"\nno category ({len(loose)}): " + (" ".join(loose) or "-"))
+        return 0
+    name = Path(folder).name
+    if category is None:
+        print(cfg.get("folders", {}).get(name, {}).get("category") or "no category")
+        return 0
+    try:
+        cfg = set_category(cfg, name, None if category == "none" else category)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if root is None:
+        print(f"{name}: saved; run apply to show it")
+        return 0
+    with exclusive(icon_dir):
+        items = [it for it in plan(root, deep=st.get("deep", 0)) if it["folder"].name == name
+                 and it["folder"].parent == root]
+        if not items:
+            print(f"{name}: saved, but there is no such folder under {root}", file=sys.stderr)
+            return 1
+        apply(root, items, icon_dir, force=st.get("force", False),
+              icon_set_id=st.get("set", "material"))
+    print(f"{name}: {category}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Material Icon Theme icons for Windows project folders.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1121,10 +1195,18 @@ def main(argv=None) -> int:
                    + ", ".join(PALETTE_KEYS) + " (experimental, for `use palette`)")
     u.add_argument("--strength", type=float, default=0.6,
                    help="0..1, how far motif colors move toward the accent (default 0.6)")
+    c = sub.add_parser("category", help="put a project into a category (tag + bar) and re-apply it; "
+                                         "without arguments, list categories and uncategorized folders")
+    c.add_argument("folder", nargs="?", help="project folder (path or name under the applied root)")
+    c.add_argument("category", nargs="?", help="category name from config.json; 'none' removes it")
+    c.add_argument("--icons", type=Path, default=HERE / "icons")
     sub.add_parser("fetch")
     sub.add_parser("icons")
     sub.add_parser("selftest")
     a = ap.parse_args(argv)
+
+    if a.cmd == "category":
+        return category_cmd(a.folder, a.category, a.icons.resolve())
 
     if a.cmd == "selftest":
         return selftest()

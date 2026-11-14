@@ -156,6 +156,14 @@ Each folder in a category gets two things:
 
 Remove the `category` and run `apply` again, and both go away.
 
+You don't have to edit `config.json` by hand for this:
+
+```
+python folder_icons.py category                     # categories, counts, folders without one
+python folder_icons.py category my-new-project web  # tag + bar, re-applies just that folder
+python folder_icons.py category my-new-project none # take it out again
+```
+
 Two more category options and one folder option:
 
 - **`"tag": "2-web"`** sets the tag text, which is also the sort key. A number in front puts the categories in your order instead of alphabetical order. The number is only visible in Details view.
